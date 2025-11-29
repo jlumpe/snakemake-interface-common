@@ -34,7 +34,6 @@ class ExamplePlugin(PluginBase):
 
 
 class ExamplePluginRegistry(PluginRegistryBase[ExamplePlugin]):
-
     @property
     def module_prefix(self) -> str:
         return "snakemake_example_plugin_"

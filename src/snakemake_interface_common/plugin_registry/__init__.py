@@ -8,9 +8,13 @@ import re
 import types
 import pkgutil
 import importlib
-from typing import Dict, List, Mapping, TYPE_CHECKING, TypeVar, Generic
+from typing import List, Mapping, TYPE_CHECKING, TypeVar, Generic
+import warnings
 
-from snakemake_interface_common.exceptions import InvalidPluginException
+from snakemake_interface_common.exceptions import (
+    InvalidPluginException,
+    InvalidPluginWarning,
+)
 from snakemake_interface_common.plugin_registry.plugin import PluginBase
 from snakemake_interface_common.plugin_registry.attribute_types import AttributeType
 
@@ -39,10 +43,20 @@ class PluginRegistryBase(ABC, Generic[TPlugin]):
     ``executor`` registry (with ``module_prefix = "snakemake_executor_plugin_"``) and registered
     under the name ``"my-executor"``. The corresponding Pip/distribution package should be named
     ``snakemake-executor-plugin-my-executor``, although this is not enforced.
+
+    Errors encountered during :meth:`collect_plugins` (which is called as part of the singleton
+    initialization) are caught, stored in :attr:`plugin_errors` and emitted as warnings. This is
+    so that one invalid plugin doesn't prevent the others from being usable. The exception will
+    be re-raised if :meth:`get_plugin` is called for the plugin. Note that the stored exceptions
+    have their ``__traceback__``, ``__cause__``, and ``__context__`` attributes cleared to avoid
+    holding references to objects in the associated stack frames for the lifetime of the registry.
+    This may make debugging plugins a bit more difficult, developers may want to call
+    :meth:`register_plugin` on the plugin module which allows the exception to propagate.
     """
 
     _instance = None
-    plugins: Dict[str, TPlugin]
+    plugins: dict[str, TPlugin]
+    plugin_errors: dict[str, InvalidPluginException]
 
     def __new__(cls):
         if cls._instance is None:
@@ -84,16 +98,27 @@ class PluginRegistryBase(ABC, Generic[TPlugin]):
         Raises
         ------
         InvalidPluginException
-            If the plugin is not registered.
+            If the plugin is not registered, or if an error occurred while loading the plugin.
         """
         try:
             return self.plugins[plugin_name]
         except KeyError:
-            pkgname = self.get_plugin_package_name(plugin_name)
+            pass
+
+        if plugin_name in self.plugin_errors:
+            err = self.plugin_errors[plugin_name]
+            # Raise a copy of the original exception (re-raising the original would result in Python
+            # setting the __traceback__ attribute of the stored exception, which we want to avoid).
             raise InvalidPluginException(
-                plugin_name,
-                f"The package {pkgname} is not installed.",
+                err.plugin_name, err.message, plugin_type=self.get_plugin_type()
             )
+
+        pkgname = self.get_plugin_package_name(plugin_name)
+        raise InvalidPluginException(
+            plugin_name,
+            f"The package {pkgname} is not installed.",
+            plugin_type=self.get_plugin_type(),
+        )
 
     def get_plugin_package_name(self, plugin_name: str) -> str:
         """Get the package name of a plugin by name.
@@ -123,8 +148,12 @@ class PluginRegistryBase(ABC, Generic[TPlugin]):
         )
 
     def collect_plugins(self) -> None:
-        """Collect plugins, import their modules, and call :meth:`register_plugin` for each."""
+        """Collect plugins, import their modules, and call :meth:`register_plugin` for each.
+
+        Any exceptions encountered will be stored in :attr:`plugin_errors` and emitted as warnings.
+        """
         self.plugins = dict()
+        self.plugin_errors = dict()
 
         for moduleinfo in pkgutil.iter_modules():
             if not moduleinfo.ispkg or not moduleinfo.name.startswith(
@@ -133,8 +162,34 @@ class PluginRegistryBase(ABC, Generic[TPlugin]):
                 continue
 
             name = moduleinfo.name.removeprefix(self.module_prefix).replace("_", "-")
-            module = importlib.import_module(moduleinfo.name)
-            self.register_plugin(name, module)
+
+            try:
+                module = importlib.import_module(moduleinfo.name)
+                self.register_plugin(name, module)
+
+            except Exception as e:
+                if isinstance(e, InvalidPluginException):
+                    plugin_err = e
+                    # Add annotation of plugin type if subclass method didn't set it
+                    if plugin_err.plugin_type is None:
+                        plugin_err.plugin_type = self.get_plugin_type()
+
+                else:
+                    plugin_err = InvalidPluginException.wrap(
+                        name,
+                        e,
+                        message="An unexpected error occurred while loading the plugin",
+                        plugin_type=self.get_plugin_type(),
+                    )
+
+                # Clear traceback and cause/context attributes to avoid holding references to
+                # objects in the associated stack frames.
+                plugin_err.__traceback__ = None
+                plugin_err.__cause__ = None
+                plugin_err.__context__ = None
+
+                self.plugin_errors[name] = plugin_err
+                warnings.warn(InvalidPluginWarning(str(plugin_err)))
 
     def register_plugin(self, name: str, module: types.ModuleType) -> None:
         """Validate and register a plugin.
@@ -185,7 +240,11 @@ class PluginRegistryBase(ABC, Generic[TPlugin]):
             if not hasattr(module, attr):
                 if attr_type.is_optional:
                     continue
-                raise InvalidPluginException(name, f"plugin does not define {attr}.")
+                raise InvalidPluginException(
+                    name,
+                    f"plugin does not define {attr}.",
+                    plugin_type=self.get_plugin_type(),
+                )
 
             attr_value = getattr(module, attr)
             if attr_type.is_class:
@@ -197,10 +256,13 @@ class PluginRegistryBase(ABC, Generic[TPlugin]):
                         name,
                         f"{attr} must be a subclass of "
                         f"{attr_type.cls.__module__}.{attr_type.cls.__name__}.",
+                        plugin_type=self.get_plugin_type(),
                     )
             else:
                 # check for instance type
                 if not isinstance(attr_value, attr_type.cls):
                     raise InvalidPluginException(
-                        name, f"{attr} must be of type {attr_type.cls.__name__}."
+                        name,
+                        f"{attr} must be of type {attr_type.cls.__name__}.",
+                        plugin_type=self.get_plugin_type(),
                     )

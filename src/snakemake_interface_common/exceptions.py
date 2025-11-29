@@ -6,6 +6,8 @@ __license__ = "MIT"
 import sys
 import textwrap
 from typing import Optional, Any
+from dataclasses import dataclass
+import traceback
 
 from snakemake_interface_common.rules import RuleInterface
 
@@ -74,6 +76,55 @@ class WorkflowError(Exception):
         return spec
 
 
+@dataclass(repr=False)
 class InvalidPluginException(ApiError):
-    def __init__(self, plugin_name: str, message: str):
-        super().__init__(f"Error loading Snakemake plugin {plugin_name}: {message}")
+    """Raised when an error occurs during plugin loading or registration."""
+
+    plugin_name: str
+    message: str
+    # Just for clearer error message (make this optional for backwards compatibility, and because
+    # some contexts don't have easy access to the registry instance)
+    plugin_type: str | None = None
+
+    def __post_init__(self) -> None:
+        ApiError.__init__(self, str(self))
+
+    def __str__(self) -> str:
+        # Support assigning plugin_type after construction
+        typestr = "plugin" if self.plugin_type is None else f"{self.plugin_type} plugin"
+        return f"Error loading Snakemake {typestr} {self.plugin_name!r}: {self.message}"
+
+    @classmethod
+    def wrap(
+        cls,
+        plugin_name: str,
+        exc: Exception,
+        message: str | None = None,
+        plugin_type: str | None = None,
+    ) -> "InvalidPluginException":
+        """Initialize from another exception.
+
+        This is mostly intended to wrap unexpected exceptions during plugin import. It includes
+        the location of the error (file and line number) because the traceback and cause/context
+        information is cleared in exception instances stored in the registry.
+        """
+        if message is None:
+            message = ""
+        else:
+            message += " "
+        # Add location of wrapped exception if available
+        tb = traceback.extract_tb(exc.__traceback__)
+        if tb:
+            frame = tb[-1]
+            message += f"(in {frame.filename}:{frame.lineno})"
+        # Wrapped exception type and message
+        message += f": {type(exc).__name__}: {exc}"
+        plugin_exc = cls(plugin_name, message, plugin_type=plugin_type)
+        # This gets cleared when caught in the registry's collect_plugins() method, but it could be
+        # useful information during testing or in other contexts.
+        plugin_exc.__cause__ = exc
+        return plugin_exc
+
+
+class InvalidPluginWarning(Warning):
+    """Emitted when an error occurs during plugin loading or registration."""
