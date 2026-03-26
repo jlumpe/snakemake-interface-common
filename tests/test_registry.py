@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from snakemake_interface_common.plugin_registry import PluginRegistryBase
 from snakemake_interface_common.plugin_registry.plugin import SettingsBase
 from snakemake_interface_common.exceptions import InvalidPluginException
 from .example_plugin import ExamplePlugin, ExamplePluginRegistry
@@ -34,6 +35,21 @@ def test_basic():
     assert not registry.is_installed("foo")
     with pytest.raises(InvalidPluginException):
         registry.get_plugin("foo")
+
+
+def test_abc():
+    """
+    Test that the metaclass preserves ABCMeta behavior of raising an exception on instantiation if
+    the class does not implement all abstract methods.
+    """
+
+    class AbstractRegistry(PluginRegistryBase):
+        pass
+
+    with pytest.raises(
+        TypeError, match="Can't instantiate abstract class AbstractRegistry"
+    ):
+        AbstractRegistry()
 
 
 def test_discovery(monkeypatch: pytest.MonkeyPatch):

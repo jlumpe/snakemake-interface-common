@@ -3,7 +3,7 @@ __copyright__ = "Copyright 2022, Johannes Köster, Vanessa Sochat"
 __email__ = "johannes.koester@uni-due.de"
 __license__ = "MIT"
 
-from abc import ABC, abstractmethod
+from abc import ABCMeta, abstractmethod
 import re
 import types
 import pkgutil
@@ -20,11 +20,27 @@ if TYPE_CHECKING:
 TPlugin = TypeVar("TPlugin", bound=PluginBase, covariant=True)
 
 
-class PluginRegistryBase(ABC, Generic[TPlugin]):
+class PluginRegistryMeta(ABCMeta):
+    """Metaclass for ``PluginRegistryBase`` to enforce singleton behavior.
+
+    A metaclass is required here to allow for subclasses to easily override ``__init__()`` without
+    needing to worry about whether the singleton instance was already initialized.
+
+    Inherit from ``ABCMeta`` to ensure subclasses implement all abstract methods.
+    """
+
+    def __call__(cls):
+        if cls._instance is None:
+            cls._instance = super().__call__()
+        return cls._instance  # type: ignore
+
+
+class PluginRegistryBase(Generic[TPlugin], metaclass=PluginRegistryMeta):
     """Base class to discover and record all available plugins of a given type.
 
     This class is a singleton, all calls to the constructor will return the same instance.
-    ``__init__()`` should not take any arguments.
+    Subclasses may override ``__init__()`` but should call ``super().__init__()``. It will only be
+    called when the initial instance is created. It cannot take any arguments.
 
     Derived class names are expected to end with ``PluginRegistry``, where the prefix is the type of
     plugin (e.g. ``ExecutorPluginRegistry``). This is returned by :meth:`get_plugin_type()`.
@@ -44,14 +60,8 @@ class PluginRegistryBase(ABC, Generic[TPlugin]):
     _instance = None
     plugins: Dict[str, TPlugin]
 
-    def __new__(cls):
-        if cls._instance is None:
-            instance = super().__new__(cls)
-            instance.collect_plugins()
-            cls._instance = instance
-        # The following can cause issues with the type checker, ignore the line to make it assume
-        # standard behavior of returning an instance of cls (which should be the case).
-        return cls._instance  # type: ignore
+    def __init__(self):
+        self.collect_plugins()
 
     ######## Abstract methods ########
 
