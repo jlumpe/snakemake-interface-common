@@ -154,7 +154,7 @@ class PluginRegistryBase(ABC, Generic[TPlugin]):
         InvalidPluginException
             If validation fails.
         """
- name = name.removeprefix(self.module_prefix).replace("_", "-")
+        name = name.removeprefix(self.module_prefix).replace("_", "-")
         if name in self.plugins:
             return
 
